@@ -5,7 +5,11 @@
 class CadillacsGame {
   constructor() {
     this.canvas = document.getElementById('game-canvas');
+    this.webglCanvas = document.getElementById('webgl-canvas');
     this.renderer = new window.ArcadeRenderer(this.canvas);
+    this.renderer3d = window.ArcadeRenderer3D && this.webglCanvas
+      ? new window.ArcadeRenderer3D(this.webglCanvas)
+      : null;
     this.width = this.canvas.width;
     this.height = this.canvas.height;
 
@@ -84,6 +88,7 @@ class CadillacsGame {
     });
 
     // Toolbar UI buttons
+    const btnCam = document.getElementById('btn-cam');
     const btnCoop = document.getElementById('btn-coop');
     const btnCrt = document.getElementById('btn-crt');
     const btnSound = document.getElementById('btn-sound');
@@ -92,6 +97,18 @@ class CadillacsGame {
     const btnFullscreen = document.getElementById('btn-fullscreen');
     const modal = document.getElementById('controls-modal');
     const crtOverlay = document.getElementById('crt-overlay');
+
+    if (btnCam && this.renderer3d) {
+      btnCam.addEventListener('click', () => {
+        const mode = this.renderer3d.cycleCameraMode();
+        const labels = {
+          arcade3d: 'VIEW: 3D ARCADE',
+          action3d: 'VIEW: 3D ACTION CAM',
+          classic2d: 'VIEW: 2D CLASSIC'
+        };
+        btnCam.textContent = labels[mode] || 'VIEW: 3D ARCADE';
+      });
+    }
 
     btnCoop.addEventListener('click', () => {
       this.aiPartnerEnabled = !this.aiPartnerEnabled;
@@ -1200,77 +1217,91 @@ class CadillacsGame {
     const ctx = this.renderer.ctx;
     ctx.clearRect(0, 0, this.width, this.height);
 
+    const is3D = this.renderer3d && this.renderer3d.cameraMode !== 'classic2d';
+    if (is3D) {
+      this.renderer3d.renderScene(this, this.time);
+    }
+
     if (this.mode === 'select') {
-      this.renderCharacterSelect(ctx);
+      this.renderCharacterSelect(ctx, is3D);
       return;
     }
 
-    ctx.save();
-    if (this.screenShake > 0) {
-      ctx.translate(
-        (Math.random() - 0.5) * this.screenShake * 2,
-        (Math.random() - 0.5) * this.screenShake * 2
-      );
+    if (!is3D) {
+      ctx.save();
+      if (this.screenShake > 0) {
+        ctx.translate(
+          (Math.random() - 0.5) * this.screenShake * 2,
+          (Math.random() - 0.5) * this.screenShake * 2
+        );
+      }
+
+      // 1. Parallax Stage Background
+      this.renderer.drawStageBackground(this.currentStage, this.cameraX, this.time);
+
+      // 2. Depth-Sort all 2.5D entities by Z coordinate (Painter's algorithm)
+      const renderList = [];
+
+      for (const prop of this.props) {
+        renderList.push({ z: prop.z, draw: () => this.renderer.drawProp(prop, this.cameraX) });
+      }
+      for (const item of this.pickups) {
+        renderList.push({ z: item.z, draw: () => this.renderer.drawPickup(item, this.cameraX, this.time) });
+      }
+      for (const dino of this.dinosaurs) {
+        renderList.push({ z: dino.z, draw: () => this.renderer.drawDinosaur(dino, this.cameraX, this.time) });
+      }
+      for (const enemy of this.enemies) {
+        renderList.push({ z: enemy.z, draw: () => this.renderer.drawFighter(enemy, this.cameraX, this.time) });
+      }
+      if (this.partner && !this.partner.dead) {
+        renderList.push({
+          z: this.partner.z,
+          draw: () => this.renderer.drawFighter(this.partner, this.cameraX, this.time)
+        });
+      }
+      if (this.cadillac && this.cadillac.active) {
+        renderList.push({
+          z: this.cadillac.z,
+          draw: () => this.renderer.drawCadillac(this.cadillac, this.cameraX, this.time)
+        });
+      } else if (this.player && !this.player.dead) {
+        renderList.push({
+          z: this.player.z,
+          draw: () => this.renderer.drawFighter(this.player, this.cameraX, this.time)
+        });
+      }
+
+      renderList.sort((a, b) => a.z - b.z);
+      for (const item of renderList) {
+        item.draw();
+      }
+
+      // 3. Projectiles & Particles (2D fallback)
+      for (const proj of this.projectiles) {
+        const { sx, sy } = this.renderer.worldToScreen(proj.x, proj.y, proj.z, this.cameraX);
+        ctx.fillStyle = proj.color || '#ffeb3b';
+        ctx.beginPath();
+        ctx.arc(sx, sy, proj.explosive ? 7 : 4.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      for (const pt of this.particles) {
+        const { sx, sy } = this.renderer.worldToScreen(pt.x, pt.y, pt.z, this.cameraX);
+        ctx.fillStyle = pt.color;
+        ctx.fillRect(sx - pt.size * 0.5, sy - pt.size * 0.5, pt.size, pt.size);
+      }
+      ctx.restore();
+    } else {
+      // 3D Mode Screen-Projected Labels & Health Bars
+      this.render3DOverlays(ctx);
     }
 
-    // 1. Parallax Stage Background
-    this.renderer.drawStageBackground(this.currentStage, this.cameraX, this.time);
-
-    // 2. Depth-Sort all 2.5D entities by Z coordinate (Painter's algorithm)
-    const renderList = [];
-
-    for (const prop of this.props) {
-      renderList.push({ z: prop.z, draw: () => this.renderer.drawProp(prop, this.cameraX) });
-    }
-    for (const item of this.pickups) {
-      renderList.push({ z: item.z, draw: () => this.renderer.drawPickup(item, this.cameraX, this.time) });
-    }
-    for (const dino of this.dinosaurs) {
-      renderList.push({ z: dino.z, draw: () => this.renderer.drawDinosaur(dino, this.cameraX, this.time) });
-    }
-    for (const enemy of this.enemies) {
-      renderList.push({ z: enemy.z, draw: () => this.renderer.drawFighter(enemy, this.cameraX, this.time) });
-    }
-    if (this.partner && !this.partner.dead) {
-      renderList.push({
-        z: this.partner.z,
-        draw: () => this.renderer.drawFighter(this.partner, this.cameraX, this.time)
-      });
-    }
-    if (this.cadillac && this.cadillac.active) {
-      renderList.push({
-        z: this.cadillac.z,
-        draw: () => this.renderer.drawCadillac(this.cadillac, this.cameraX, this.time)
-      });
-    } else if (this.player && !this.player.dead) {
-      renderList.push({
-        z: this.player.z,
-        draw: () => this.renderer.drawFighter(this.player, this.cameraX, this.time)
-      });
-    }
-
-    renderList.sort((a, b) => a.z - b.z);
-    for (const item of renderList) {
-      item.draw();
-    }
-
-    // 3. Projectiles, Particles, and Floating Arcade Popups
-    for (const proj of this.projectiles) {
-      const { sx, sy } = this.renderer.worldToScreen(proj.x, proj.y, proj.z, this.cameraX);
-      ctx.fillStyle = proj.color || '#ffeb3b';
-      ctx.beginPath();
-      ctx.arc(sx, sy, proj.explosive ? 7 : 4.5, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    for (const pt of this.particles) {
-      const { sx, sy } = this.renderer.worldToScreen(pt.x, pt.y, pt.z, this.cameraX);
-      ctx.fillStyle = pt.color;
-      ctx.fillRect(sx - pt.size * 0.5, sy - pt.size * 0.5, pt.size, pt.size);
-    }
-
+    // Floating Arcade Damage & Score Popups
     for (const ft of this.floatingTexts) {
-      const { sx, sy } = this.renderer.worldToScreen(ft.x, ft.y, ft.z, this.cameraX);
+      const { sx, sy } = is3D
+        ? this.renderer3d.projectToScreen(ft.x, ft.y, ft.z)
+        : this.renderer.worldToScreen(ft.x, ft.y, ft.z, this.cameraX);
       ctx.font = '900 18px Impact, sans-serif';
       ctx.textAlign = 'center';
       ctx.strokeStyle = '#000';
@@ -1279,8 +1310,6 @@ class CadillacsGame {
       ctx.fillStyle = ft.color;
       ctx.fillText(ft.text, sx, sy);
     }
-
-    ctx.restore();
 
     // 4. Arcade HUD & Stage Intro Banner
     this.renderer.drawHUD(this, this.time);
@@ -1306,13 +1335,81 @@ class CadillacsGame {
     }
   }
 
+  render3DOverlays(ctx) {
+    ctx.save();
+    // Player 1 badge
+    if (this.player && !this.player.dead && !(this.cadillac && this.cadillac.active)) {
+      const { sx, sy } = this.renderer3d.projectToScreen(this.player.x, this.player.y + 92, this.player.z);
+      ctx.fillStyle = '#ffd700';
+      ctx.font = '900 12px Impact, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('▼ 1P', sx, sy);
+    }
+
+    // Cadillac timer banner
+    if (this.cadillac && this.cadillac.active) {
+      const { sx, sy } = this.renderer3d.projectToScreen(this.cadillac.x, 95, this.cadillac.z);
+      ctx.fillStyle = '#ffd700';
+      ctx.font = '900 15px Impact, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.strokeStyle = '#000';
+      ctx.lineWidth = 3;
+      const msg = `1953 CADILLAC V8 — RAM POACHERS! (${Math.ceil(this.cadillac.timer / 60)}s)`;
+      ctx.strokeText(msg, sx, sy);
+      ctx.fillText(msg, sx, sy);
+    }
+
+    // Enemy & Partner health bars projected above 3D heads
+    const bars = [...this.enemies];
+    if (this.partner && !this.partner.dead) bars.push(this.partner);
+    for (const ent of bars) {
+      if (ent.dead || ent.hp <= 0) continue;
+      const { sx, sy } = this.renderer3d.projectToScreen(ent.x, ent.y + 92 * (ent.scale || 1), ent.z);
+      if (sx < -60 || sx > this.width + 60) continue;
+      const barW = ent.isBoss ? 76 : 46;
+      ctx.fillStyle = 'rgba(0,0,0,0.75)';
+      ctx.fillRect(sx - barW / 2 - 1, sy - 1, barW + 2, 7);
+      const pct = Math.max(0, ent.hp / ent.maxHp);
+      ctx.fillStyle = ent.isPartner ? '#00e5ff' : ent.isBoss ? '#ff1744' : '#ff9100';
+      ctx.fillRect(sx - barW / 2, sy, barW * pct, 5);
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 10px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(ent.name, sx, sy - 4);
+    }
+
+    // Dinosaur Calm/Enraged badges
+    for (const dino of this.dinosaurs) {
+      if (dino.dead) continue;
+      const { sx, sy } = this.renderer3d.projectToScreen(dino.x, dino.y + 78, dino.z);
+      ctx.font = 'bold 10px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillStyle = dino.calm ? '#a7f3d0' : '#ff4d4d';
+      ctx.fillText(dino.calm ? 'DINO [CALM]' : 'DINO [ENRAGED!]', sx, sy);
+    }
+
+    // Pickup item labels
+    for (const item of this.pickups) {
+      const { sx, sy } = this.renderer3d.projectToScreen(item.x, 38, item.z);
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 11px Segoe UI, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.strokeStyle = '#000';
+      ctx.lineWidth = 2;
+      ctx.strokeText(item.name, sx, sy);
+      ctx.fillText(item.name, sx, sy);
+    }
+    ctx.restore();
+  }
+
   // ==========================================================================
   // TITLE & CHARACTER SELECT SCREEN
   // ==========================================================================
-  renderCharacterSelect(ctx) {
-    // Animated Xenozoic Background
-    this.renderer.drawStageBackground(window.GAME_DATA.STAGES[0], this.time * 0.06, this.time);
-    ctx.fillStyle = 'rgba(6, 9, 18, 0.78)';
+  renderCharacterSelect(ctx, is3D = false) {
+    if (!is3D) {
+      this.renderer.drawStageBackground(window.GAME_DATA.STAGES[0], this.time * 0.06, this.time);
+    }
+    ctx.fillStyle = is3D ? 'rgba(6, 9, 18, 0.56)' : 'rgba(6, 9, 18, 0.78)';
     ctx.fillRect(0, 0, this.width, this.height);
 
     // Title Logo Banner
